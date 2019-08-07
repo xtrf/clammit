@@ -74,17 +74,15 @@ func (c *ScanInterceptor) Handle(w http.ResponseWriter, req *http.Request, body 
 				http.Error(w, "Bad Request", 400)
 				return true
 			} else {
-				count++
-				filename := part.FileName()
-				if filename == "" {
-					filename = "untitled"
-				}
 				defer part.Close()
-				if ctx.Config.App.Debug {
-					ctx.Logger.Println("Scanning", part.FileName())
-				}
-				if responded := c.respondOnVirus(w, filename, part); responded == true {
-					return true
+				if part.FileName() != "" {
+					count++
+					if ctx.Config.App.Debug {
+						ctx.Logger.Println("Scanning", part.FileName())
+					}
+					if responded := c.respondOnVirus(w, part.FileName(), part); responded == true {
+						return true
+					}
 				}
 			}
 		}
