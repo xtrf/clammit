@@ -108,8 +108,7 @@ func (c *ScanInterceptor) Handle(w http.ResponseWriter, req *http.Request, body 
 func (c *ScanInterceptor) respondOnVirus(w http.ResponseWriter, filename string, reader io.Reader) bool {
 	if hasVirus, err := c.Scanner.HasVirus(reader); err != nil {
 		ctx.Logger.Printf("Unable to scan file (%s): %v\n", filename, err)
-		http.Error(w, "Internal Server Error", 500)
-		return true
+		return false
 	} else if hasVirus {
 		w.WriteHeader(c.VirusStatusCode)
 		w.Write([]byte(fmt.Sprintf("File %s has a virus!", filename)))
