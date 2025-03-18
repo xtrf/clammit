@@ -9,3 +9,6 @@ CLAMMIT:
  - not really like passing the http response around, because
    this way http response codes are scattered around the code
 
+GO-CLAMD:
+
+ - fix memory leak https://github.com/ifad/clammit/pull/22

@@ -3,58 +3,65 @@
 [![Build Status](https://travis-ci.org/ifad/clammit.svg)](https://travis-ci.org/ifad/clammit)
 [![Code Climate](https://codeclimate.com/github/ifad/clammit/badges/gpa.svg)](https://codeclimate.com/github/ifad/clammit)
 
-Clammit is a proxy that will perform virus scans of files uploaded via http requests,
-including `multipart/form-data`.  If a virus exists, it will reject the request out of
-hand. If no virus exists, the request is then forwarded to the application and
-it's response returned in the upstream direction.
-
-As the name implies, Clammit offloads the virus detection to the ClamAV virus
-detection server (clamd).
+Clammit is an HTTP interface to the ClamAV virus scanner, able to unwrap HTTP
+bodies, checking them against clamd and returning a binary clean/virus status.
 
 ## Usage
 
-Clammit is intended to be used as an internal proxy, a sort of middleware. It
-is best to only pass requests that include a file upload, however requests that
-aren't `POST`/`PUT`/`PATCH` are passed through directly without being scanned.
+Clammit parses and processes inbound HTTP requests. When it handles a request whose
+Content-Length is non-zero, it will attempt to decode multipart file uploads and pass
+each part or the whole body to ClamAV. If ClamAV detects a virus, clammit will then
+return a response with code 418 to the caller. Otherwise, it will continue processing.
 
-As an example, say you have a Rails application that is configured in Nginx
+Clammit can be be used in two ways: as an intercepting proxy or as a virus check service.
+
+### Usage as a proxy
+
+When used as a proxy, clammit sits in between the client and your application, thus
+preventing uploads with virus files to reach your application, by returning a 418 to
+your app's client. For this mode to work, clammit must be able to contact your app
+directly, so it is best suited when clammit is executing on the same machine as your
+app.
+
+As an example, say you have a `foo` Rails application that is configured in Nginx
 like this:
 
 ```nginx
-set $my_app /myapp;
-
 server {
   listen 80;
-  server_name my_app.com;
+  server_name foobar.example.com;
 
-  root $my_app/public;
-  try_files $uri/index.html $uri @app;
+  root /home/foobar/public;
+  try_files $uri/index.html $uri @foobar;
 
-  location @app {
-    access_log /var/log/nginx/my_app-access.log;
+  location @foobar {
+    access_log /var/log/nginx/foobar.app-access.log;
+    error_log  /var/log/nginx/foobar.app-error.log;
+
     proxy_set_header Host $http_host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_pass http://unix:$my_app/.unicorn.sock;
+    proxy_pass http://unix:/home/foobar/.unicorn.sock;
   }
-
-  error_page 500 502 503 504 /500.html;
-  client_max_body_size 4G;
-  keepalive_timeout 10;
 }
 ```
 
 Assuming you receive document uploads at `POST /documents`, to check them with
-Clammit add another location block like this:
+a Clammit that has been configured to listen on an UNIX socket in
+`/var/run/clammit.sock`, you should add a location block like this:
 
 ```nginx
-  set $clammit_app /clammit;
-
   location /documents {
-    access_log /var/log/nginx/my_app-access.log;
+    access_log /var/log/nginx/foobar.clammit-access.log;
+    error_log  /var/log/nginx/foobar.clammit-error.log;
+
     proxy_set_header Host $http_host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Clammit-Backend unix:$my_app/.unicorn.sock;
-    proxy_pass http://unix:$clammit_app/.unicorn.sock;
+
+    # This is where clammit will forward requests that do not contain viruses
+    # or that did not contain any data to scan.
+    proxy_set_header X-Clammit-Backend unix:/home/foobar/.unicorn.sock;
+
+    proxy_pass http://unix:/var/run/clammit.sock;
   }
 ```
 
@@ -66,6 +73,49 @@ If a virus is detected, Clammit will reject the request (with a `418` status
 code), and not forward it to your application. If you use an AJAX uploader, you
 can interpret this response and show a nice error message to end users. Or you
 could set a custom error page in Nginx.
+
+### Usage as a service
+
+When used as a service, clammit can be anywhere in your architecture, and it will
+return a 200 OK if the request has no virus, or a configurable status code if a
+virus is detected.
+
+To scan a file, send it via HTTP - using any method you prefer - to the
+`/clammit/scan` endpoint.
+
+Example, with cURL:
+
+```sh
+curl -sf http://localhost:8438/clammit/scan -d @/some/file
+```
+
+Or with Python:
+
+```py
+import requests
+
+>>> r = requests.post('http://localhost:8438/clammit/scan', files={'file': open('/etc/passwd', 'rb')})
+>>> r.status_code
+200
+
+>>> r = requests.post('http://localhost:8438/clammit/scan', files={'file': b'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'})
+>>> r.status_code
+418
+```
+
+Or with Ruby:
+
+```ruby
+require 'httparty'
+
+>> r = HTTParty.post('http://localhost:8438/clammit/scan', body: { file: File.open('/etc/passwd') })
+>> r.code
+=> 200
+
+>> r = HTTParty.post('http://localhost:8438/clammit/scan', multipart: true, body: { file: 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' })
+>> r.code
+=> 418
+```
 
 ## Configuration
 
@@ -83,20 +133,22 @@ debug           = true
 test-pages      = true
 ```
 
-Setting         | Description
-:---------------| :-----------------------------------------------------------------------------
-listen          | The listen address (see below)
-clamd-url       | The URL of the clamd server
-application-url | (Optional) Forward all requests to this application
-log-file        | (Optional) The clammit log file, if ommitted will log to stdout
-test-pages      | (Optional) If true, clammit will also offer up a page to perform test uploads
-debug           | (Optional) If true, more things will be logged
-debug-clam      | (Optional) If true, the response from ClamAV will be logged
+Setting                  | Description
+:------------------------| :-----------------------------------------------------------------------------
+listen                   | The listen address (see below)
+unix-socket-perms        | The file mode of the UNIX socket, if listening on one
+clamd-url                | The URL of the clamd server
+virus-status-code        | (Optional) The HTTP status code to return when a virus is found. Default 418
+application-url          | (Optional) Forward all requests to this application
+content-memory-threshold | (Optional) Maximum payload size to keep in RAM. Larger files are spooled to disk
+log-file                 | (Optional) The clammit log file, if omitted will log to stdout
+test-pages               | (Optional) If true, clammit will also offer up a page to perform test uploads
+debug                    | (Optional) If true, more things will be logged
 
 The listen address can be a TCP port or Unix socket, e.g.:
 
-* `0.0.0.0:8438`       - Listen on all IPs on port 8438
-* `unix:.clammit.sock` - Listen on a Unix socket
+* `0.0.0.0:8438`               - Listen on all IPs on port 8438
+* `unix:/var/run/clammit.sock` - Listen on a Unix socket
 
 The same format applies to the `clamd-url` and `application-url` parameters.
 
@@ -120,14 +172,14 @@ incoming requests (main.go):
 
 ## Building
 
-Clammit is requires the Go compiler, version 1.2 or above. It also requires ```make```
+Clammit requires the Go compiler, version 1.15 or above. It also requires `make`
 to ease compilation. The makefile is pretty simple, though, so you can perform its
 steps manually if you want.
 
 You will need external access to github and code.google.com to load the
 third-party packages that Clammit depends on: [go-clamd][] and [gcfg][].
 
-Once you have this, simple run:
+Once you have this, simply run:
 
 ```sh
 make
@@ -148,7 +200,7 @@ make test         | Runs the application unit tests
 
 1. Copy the compiled binary (bin/clammit), either into your project repository, or to an installation area.
 2. Edit the configuration file as appropriate.
-3. Configure your auto-start mechanism, be it God or init.d
+3. Configure your auto-start mechanism, be it God or init.d. An example systemd unit is provided.
 4. Configure the upstream webserver to forward appropriate POST requests to clammit.
 
 ## API
@@ -159,7 +211,7 @@ that these are not available externally.
 ### Info
 
 ```
-  GET /clammit/info
+  GET /clammit
 ```
 
 This method will return JSON giving the current status of Clammit and its connection to ClamAV.
@@ -172,6 +224,16 @@ This method will return JSON giving the current status of Clammit and its connec
 
 This is the endpoint to submit files for scanning only. Any files to be scanned should be attached as file objects.
 Clammit will return an HTTP status code of 200 if the request is clean and 418 if there is a bad attachment.
+
+### Ready
+
+```
+  GET /clammit/readyz
+```
+
+Returns 200 OK unless we are shutting down, waiting for currently running requests to complete.
+
+Clammit does not implement a liveness check, as clammit is available if its TCP socket is open.
 
 ### Test
 
