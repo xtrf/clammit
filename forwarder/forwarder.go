@@ -163,7 +163,7 @@ func (f *Forwarder) HandleRequest(w http.ResponseWriter, req *http.Request) {
  * as possible of the request - headers and body.
  */
 func (f *Forwarder) forwardRequest(req *http.Request, body io.Reader, contentLength int64) (*http.Response, error) {
-	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS10}
 	client, url := f.getClient(req)
 	freq, _ := http.NewRequest(req.Method, url.String(), body)
 	freq.ContentLength = contentLength
